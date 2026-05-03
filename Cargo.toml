@@ -1,0 +1,15 @@
+[package]
+name = "fssh"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes-gcm = "0.10"
+chacha20 = "0.9"
+poly1305 = "0.8"
+clap = { version = "4.6.1", features = ["derive"] }
+hex = "0.4.3"
+rand = "0.8.5"
+ring = "0.17.14"
+rpassword = "7.5.1"
+whoami = "2.1.2"
