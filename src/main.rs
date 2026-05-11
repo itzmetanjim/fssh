@@ -1,4 +1,5 @@
 use clap::Parser;
+use base64::{engine::general_purpose, Engine as _};
 use whoami::username;
 use std::process;
 use std::io::{Read,Write,stdout};
@@ -115,9 +116,9 @@ fn write_packet(stream: &mut TcpStream, payload: &[u8], transport: &mut Transpor
 
 #[repr(u8)]
 enum SshMessage {
-    Disconnect = 1,
-    Ignore = 2,
-    Unimplemented = 3,
+    //Disconnect = 1,
+    //Ignore = 2,
+    //Unimplemented = 3,
     ServiceRequest = 5,
     ServiceAccept = 6,
     KexInit = 20,
@@ -134,7 +135,7 @@ enum SshMessage {
     ChannelData = 94,
     ChannelRequest = 98,
     ChannelEOF = 96,
-    ChannelClose = 97,
+    //ChannelClose = 97,
 }
 
 fn push_ssh_string(buf: &mut Vec<u8>, s: &str) {
@@ -667,6 +668,32 @@ fn main() {
     });
     eprintln!("Signature verified successfully!");
 
+
+    let hash = ring::digest::digest(&ring::digest::SHA256, shostkey);
+    let encoded = general_purpose::STANDARD_NO_PAD.encode(hash.as_ref());
+    eprintln!("===== HOST KEY VERIFICATION =====");
+    eprintln!("Key fingerprint of {} is:\n    SHA256:{}",server,encoded);
+    eprintln!("Do you trust this fingerprint? (yes/no/[fingerprint])");
+    eprint!("> ");
+    std::io::stdout().flush().unwrap();
+
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response).unwrap();
+    let response = response.trim();
+    let responsel= response.to_lowercase();
+
+    if responsel != "yes" {
+        if responsel == "no"{
+            eprintln!("Aborting.");
+            process::exit(1);
+        }
+        if (response != encoded) && (response != "SHA256:".to_string()+&encoded.to_string()){
+            eprintln!("Host key fingerprint DOES NOT match! Aborting.");
+            process::exit(1);
+        } else {
+            eprintln!("Host key fingerprint successfully matched. ")
+        }
+    }
     eprintln!("Sending NEWKEYS message");
     write_packet(&mut stream, &[SshMessage::NewKeys as u8], &mut transport);
     eprintln!("Receiving reply");
@@ -741,7 +768,7 @@ fn main() {
     }
 
     'password: loop {
-        let prompt = format!("Password for {}@{}\n   >", user, server);
+        let prompt = format!("Password for {}@{}\n> ", user, server);
         let password = rpassword::prompt_password(&prompt).unwrap_or_else(|_e| {
             eprint!("\r      \r");
             process::exit(130);
@@ -775,7 +802,7 @@ fn main() {
     chan_req.extend_from_slice(&32768u32.to_be_bytes());
     write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &chan_req);
 
-    let mut server_chan_id = 0;
+    let server_chan_id;
     loop {
         let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
         if reply[0] == SshMessage::ChannelOpenConfirmation as u8 {
