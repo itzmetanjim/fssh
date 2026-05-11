@@ -1,7 +1,7 @@
 use clap::Parser;
 use whoami::username;
 use std::process;
-use std::io::{Read,Write};
+use std::io::{Read,Write,stdout};
 use std::net::TcpStream;
 use ring;
 use rand::{RngCore, thread_rng};
@@ -13,7 +13,8 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use poly1305::Poly1305;
-
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode,LeaveAlternateScreen};
+use crossterm::{execute,cursor::Show};
 const CLIENT_VERSION: &str = "SSH-2.0-OpenSSH_10.2p1, LibreSSL 3.3.6\r\n";
 
 #[derive(Parser, Debug)]
@@ -36,6 +37,22 @@ struct Transport {
     recv_sequence: u32,
 }
 
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> Self {
+        enable_raw_mode().expect("Failed to enable raw mode");
+        RawModeGuard
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen, Show);
+        let _ = stdout().flush();
+    }
+}
 fn read_packet(stream: &mut TcpStream, transport: &mut Transport) -> Vec<u8> {
     transport.recv_sequence = transport.recv_sequence.wrapping_add(1);
     let mut lenb = [0u8; 4];
@@ -65,7 +82,6 @@ fn read_packet(stream: &mut TcpStream, transport: &mut Transport) -> Vec<u8> {
 }
 
 fn write_packet(stream: &mut TcpStream, payload: &[u8], transport: &mut Transport) {
-    transport.send_sequence = transport.send_sequence.wrapping_add(1);
     let block_size = 8;
     let mut padding_len = block_size - ((4 + payload.len() + 1) % block_size);
     if padding_len < 4 {
@@ -94,6 +110,7 @@ fn write_packet(stream: &mut TcpStream, payload: &[u8], transport: &mut Transpor
         eprintln!("Failed to flush stream: {}", e);
         process::exit(1);
     });
+    transport.send_sequence = transport.send_sequence.wrapping_add(1);
 }
 
 #[repr(u8)]
@@ -163,7 +180,7 @@ fn derive_ssh_key(k: &[u8], h: &[u8], label: u8, session_id: &[u8], len: usize) 
 
 fn encrypt_chacha20(main_key: &[u8; 32], header_key: &[u8; 32], seq: u32, payload: &[u8]) -> Vec<u8> {
     let block_size = 8;
-    let mut padding_len = block_size - ((5 + payload.len()) % block_size);
+    let mut padding_len = block_size - ((1 + payload.len()) % block_size);
     if padding_len < 4 { padding_len += block_size; }
 
     let packet_len = (payload.len() + padding_len + 1) as u32;
@@ -183,9 +200,11 @@ fn encrypt_chacha20(main_key: &[u8; 32], header_key: &[u8; 32], seq: u32, payloa
     let mut header_cipher = ChaCha20::new(header_key.into(), &nonce.into());
     header_cipher.apply_keystream(&mut header_bytes);
 
-    let mut poly_key = [0u8; 32];
     let mut body_cipher = ChaCha20::new(main_key.into(), &nonce.into());
-    body_cipher.apply_keystream(&mut poly_key);
+    let mut poly_block=[0u8; 64];
+    body_cipher.apply_keystream(&mut poly_block);
+    let mut poly_key = [0u8; 32];
+    poly_key.copy_from_slice(&poly_block[..32]);
     body_cipher.apply_keystream(&mut body);
 
     let mut full_packet = header_bytes.to_vec();
@@ -203,7 +222,7 @@ fn encrypt_aes256(key: &[u8; 32], iv: &[u8; 12], seq: u32, payload: &[u8]) -> Ve
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let block_size = 16;
-    let mut padding_len = block_size - ((5 + payload.len()) % block_size);
+    let mut padding_len = block_size - ((1 + payload.len()) % block_size);
     if padding_len < 4 { padding_len += block_size; }
 
     let packet_len = (payload.len() + padding_len + 1) as u32;
@@ -231,7 +250,7 @@ fn encrypt_aes128(key: &[u8; 16], iv: &[u8; 12], seq: u32, payload: &[u8]) -> Ve
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     let block_size = 16;
-    let mut padding_len = block_size - ((5 + payload.len()) % block_size);
+    let mut padding_len = block_size - ((1 + payload.len()) % block_size);
     if padding_len < 4 { padding_len += block_size; }
 
     let packet_len = (payload.len() + padding_len + 1) as u32;
@@ -256,10 +275,14 @@ fn decrypt_length_chacha20(header_key: &[u8; 32], seq: u32, encrypted_header: &[
     let counter = (seq as u64).to_be_bytes();
     nonce[4..12].copy_from_slice(&counter);
 
-    let mut header = encrypted_header.to_vec();
+    // Ensure we only process 4 bytes
+    let mut header = [0u8; 4];
+    header.copy_from_slice(&encrypted_header[..4]);
+    
     let mut header_cipher = ChaCha20::new(header_key.into(), &nonce.into());
     header_cipher.apply_keystream(&mut header);
-    u32::from_be_bytes(header.try_into().unwrap())
+    
+    u32::from_be_bytes(header)
 }
 
 fn decrypt_length_aes256(encrypted_header: &[u8]) -> u32 {
@@ -275,25 +298,34 @@ fn decrypt_payload_chacha20(main_key: &[u8; 32], seq: u32, encrypted_header: &[u
     let counter = (seq as u64).to_be_bytes();
     nonce[4..12].copy_from_slice(&counter);
 
+    let mut chacha = ChaCha20::new(main_key.into(), &nonce.into());
+    
+    let mut poly_block=[0u8;64];
+    chacha.apply_keystream(&mut poly_block);
     let mut poly_key = [0u8; 32];
-    let mut body_cipher = ChaCha20::new(main_key.into(), &nonce.into());
-    body_cipher.apply_keystream(&mut poly_key);
+    poly_key.copy_from_slice(&poly_block[..32]);
 
+    // Step 2: Separate body and tag
     let (body, tag) = encrypted_body_with_tag.split_at(encrypted_body_with_tag.len() - 16);
-    let mut mac_data = encrypted_header[..4].to_vec();
+    
+    // Step 3: Verify MAC
+    // MAC is calculated over [4-byte encrypted length] + [encrypted payload + padding]
+    let mut mac_data = encrypted_header[..4].to_vec(); 
     mac_data.extend_from_slice(body);
+    
     let expected_tag = Poly1305::new(&poly_key.into()).compute_unpadded(&mac_data);
     if expected_tag[..] != tag[..] {
-        eprintln!("Algorithm mismatch or corrupted packet: invalid MAC for body");
+        eprintln!("SSH MAC Verification Failed! Potential tampering or key mismatch.");
         process::exit(1);
     }
 
+    // Step 4: Decrypt Body (Starting at Counter 1)
     let mut decrypted = body.to_vec();
-    body_cipher.apply_keystream(&mut decrypted);
+    chacha.apply_keystream(&mut decrypted);
+    
     let padding_len = decrypted[0] as usize;
     decrypted[1..decrypted.len() - padding_len].to_vec()
 }
-
 fn decrypt_payload_aes256(key: &[u8; 32], iv: &[u8; 12], seq: u32, encrypted_body_with_tag: &[u8], aad: &[u8]) -> Vec<u8> {
     let cipher = Aes256Gcm::new_from_slice(key).unwrap();
     let mut nonce_bytes = *iv;
@@ -425,33 +457,34 @@ fn write_enc_packet(stream: &mut TcpStream, cipher: &Cipher, seq: &mut u32, payl
 fn read_enc_packet(stream: &mut TcpStream, cipher: &Cipher, seq: &mut u32) -> Vec<u8> {
     match cipher {
         Cipher::ChaCha20Poly1305 { .. } => {
-            let mut enc_header = vec![0u8; 4 + 16];
+            // FIX: Only read the 4-byte encrypted length
+            let mut enc_header = [0u8; 4];
             stream.read_exact(&mut enc_header).unwrap_or_else(|e| {
                 eprintln!("Failed to read encrypted packet header: {}", e);
                 process::exit(1);
             });
+
+            // Decrypt the 4-byte length
             let pkt_len = cipher.decrypt_length(*seq, &enc_header);
+
+            // Read the rest: (Payload + Padding) + 16-byte MAC Tag
             let mut rest = vec![0u8; pkt_len as usize + 16];
             stream.read_exact(&mut rest).unwrap_or_else(|e| {
                 eprintln!("Failed to read encrypted packet body: {}", e);
                 process::exit(1);
             });
+
             let payload = cipher.decrypt_payload(*seq, &enc_header, &rest);
             *seq = seq.wrapping_add(1);
             payload
         }
         Cipher::Aes128Gcm { .. } | Cipher::Aes256Gcm { .. } => {
+            // (Your existing GCM logic is correct because GCM headers are cleartext)
             let mut header = [0u8; 4];
-            stream.read_exact(&mut header).unwrap_or_else(|e| {
-                eprintln!("Failed to read encrypted packet header: {}", e);
-                process::exit(1);
-            });
+            stream.read_exact(&mut header).unwrap();
             let pkt_len = cipher.decrypt_length(*seq, &header);
             let mut rest = vec![0u8; pkt_len as usize + 16];
-            stream.read_exact(&mut rest).unwrap_or_else(|e| {
-                eprintln!("Failed to read encrypted packet body: {}", e);
-                process::exit(1);
-            });
+            stream.read_exact(&mut rest).unwrap();
             let payload = cipher.decrypt_payload(*seq, &header, &rest);
             *seq = seq.wrapping_add(1);
             payload
@@ -671,8 +704,8 @@ fn main() {
         process::exit(1);
     };
 
-    transport.send_sequence = 0;
-    transport.recv_sequence = 0;
+    //transport.send_sequence = 0;
+    //transport.recv_sequence = 0;
     let session_id = hashb;
     let key_c = derive_ssh_key(&kmpint, hashb, b'C', session_id, keys_len);
     let key_d = derive_ssh_key(&kmpint, hashb, b'D', session_id, keys_len);
@@ -790,6 +823,7 @@ fn main() {
                 std::io::stdout().write_all(data).unwrap();
                 std::io::stdout().flush().unwrap();
             } else if pkt[0] == SshMessage::ChannelEOF as u8 {
+                let _ = disable_raw_mode();
                 eprintln!("\nConnection closed by server.");
                 std::process::exit(0);
             }
@@ -798,6 +832,7 @@ fn main() {
 
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 1024];
+    let _raw_mode = RawModeGuard::new();
     loop {
         let n = stdin.read(&mut buf).unwrap();
         if n == 0 { break; }
