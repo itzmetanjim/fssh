@@ -16,7 +16,17 @@ use chacha20::cipher::{KeyIvInit, StreamCipher};
 use poly1305::Poly1305;
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode,LeaveAlternateScreen};
 use crossterm::{execute,cursor::Show};
-const CLIENT_VERSION: &str = "SSH-2.0-OpenSSH_10.2p1, LibreSSL 3.3.6\r\n";
+const CLIENT_VERSION: &str = "SSH-2.0-OpenSSH_10.2p1, LibreSSL 3.3.6\n";
+macro_rules! dprint {
+    ($debug:expr, $fmt:expr $(, $($arg:tt)*)?) => {
+        if $debug {
+            eprintln!($fmt $(, $($arg)*)?);
+        } else {
+            // Prepend the clear-line codes directly to the format string
+            eprint!(concat!("\x1b[2K\r", $fmt) $(, $($arg)*)?);
+        }
+    };
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about = "A simple SSH tool")]
@@ -31,6 +41,9 @@ struct Args {
 
     #[arg(long, help = "Comma-separated list of ciphers to exclude")]
     not_algs: Option<String>,
+
+    #[arg(long, help = "Whether to debug or not")]
+    debug: bool,
 }
 
 struct Transport {
@@ -518,10 +531,9 @@ fn filter_algorithms(algs: &str, not_algs: &Option<String>) -> String {
         algs.to_string()
     }
 }
-
 fn main() {
     let args = Args::parse();
-
+    let debug: bool=args.debug;
     let parts: Vec<&str> = args.host.split("@").collect();
     let user = if parts.len() == 1 { username().unwrap_or("".into()) } else { parts[0].into() };
     let server = parts[parts.len() - 1];
@@ -544,7 +556,9 @@ fn main() {
         stream.read_exact(&mut byte).unwrap();
         server_version.push(byte[0]);
     }
-    println!("Server Version\n    {}", String::from_utf8_lossy(&server_version).trim());
+    if debug{
+        eprintln!("Server Version\n    {}", String::from_utf8_lossy(&server_version).trim());
+    }
     stream.write_all(CLIENT_VERSION.as_bytes()).unwrap_or_else(|e| {
         eprintln!("Failed to send client version: {}", e);
         process::exit(1);
@@ -575,17 +589,17 @@ fn main() {
     push_ssh_string(&mut kexinit_payload, "");
     kexinit_payload.extend_from_slice(&[0u8; 5]);
 
-    eprintln!("Initializing key exchange");
+    dprint!(debug,"Initializing key exchange");
     write_packet(&mut stream, &kexinit_payload, &mut transport);
-    eprintln!("Receiving server key exchange packet");
+    dprint!(debug,"Receiving server key exchange packet");
     let server_kexinit = read_packet(&mut stream, &mut transport);
     if server_kexinit[0] != SshMessage::KexInit as u8 {
         eprintln!("Expected KEXINIT message, got {}", server_kexinit[0]);
         process::exit(1);
     }
-    eprintln!("Received packet of length {}", server_kexinit.len());
+    dprint!(debug,"Received packet of length {}", server_kexinit.len());
 
-    eprintln!("Generating X25519 keypair");
+    dprint!(debug,"Generating X25519 keypair");
     let rng = ring::rand::SystemRandom::new();
     let privkey = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng).unwrap_or_else(|e| {
         eprintln!("Failed to generate private key: {}", e);
@@ -598,10 +612,10 @@ fn main() {
     let mut ecdh_init = Vec::new();
     ecdh_init.push(SshMessage::KexEcdhInit as u8);
     push_ssh_bytes(&mut ecdh_init, pubkey.as_ref());
-    eprintln!("Sending ECDH init packet");
+    dprint!(debug,"Sending ECDH init packet");
     write_packet(&mut stream, &ecdh_init, &mut transport);
 
-    eprintln!("Receiving reply");
+    dprint!(debug,"Receiving reply");
     let server_reply = read_packet(&mut stream, &mut transport);
     if server_reply[0] != SshMessage::KexEcdhReply as u8 {
         eprintln!("Expected KEXECDHREPLY message, got {}", server_reply[0]);
@@ -611,11 +625,13 @@ fn main() {
     let shostkey = pop_ssh_bytes(&server_reply, &mut offset);
     let spubkey = pop_ssh_bytes(&server_reply, &mut offset);
     let ssignature = pop_ssh_bytes(&server_reply, &mut offset);
-    eprintln!("Server host key:\n    {}", hex::encode(shostkey));
-    eprintln!("Server public key:\n    {}", hex::encode(spubkey));
-    eprintln!("Server signature:\n    {}", hex::encode(ssignature));
+    if debug{
+        dprint!(debug,"Server host key:\n    {}", hex::encode(shostkey));
+        dprint!(debug,"Server public key:\n    {}", hex::encode(spubkey));
+        dprint!(debug,"Server signature:\n    {}", hex::encode(ssignature));
+    }
 
-    eprintln!("Computing shared secret");
+    dprint!(debug,"Computing shared secret");
     let mut kmpint = Vec::new();
     use std::hint::black_box;
     let _ = agreement::agree_ephemeral(privkey, &agreement::UnparsedPublicKey::new(&agreement::X25519, spubkey), |km| {
@@ -629,11 +645,11 @@ fn main() {
         kmpint.extend_from_slice(km);
         Ok::<(), ring::error::Unspecified>(())
     }).unwrap_or_else(|e| {
-        eprintln!("Failed to compute shared secret: {}", e);
+        dprint!(debug,"Failed to compute shared secret: {}", e);
         process::exit(1);
     });
 
-    eprintln!("Computed shared secret, {} bytes", kmpint.len());
+    dprint!(debug,"Computed shared secret, {} bytes", kmpint.len());
 
     let mut hbuf = Vec::new();
     push_ssh_string(&mut hbuf, CLIENT_VERSION.trim());
@@ -647,41 +663,42 @@ fn main() {
 
     let h = digest::digest(&digest::SHA256, &hbuf);
     let hashb = h.as_ref();
-    eprintln!("Exchange hash:\n    {}", hex::encode(hashb));
+    if debug{
+        dprint!(debug,"Exchange hash:\n    {}", hex::encode(hashb));
+    }
 
     let mut sigoffset = 0;
     let sigalg = pop_ssh_bytes(&ssignature, &mut sigoffset);
     let sigblob = pop_ssh_bytes(&ssignature, &mut sigoffset);
-    eprintln!("Signature algorithm: {}", String::from_utf8_lossy(sigalg));
-    eprintln!("Signature blob is {} bytes", sigblob.len());
+    dprint!(debug,"Signature algorithm: {}", String::from_utf8_lossy(sigalg));
+    dprint!(debug,"Signature blob is {} bytes", sigblob.len());
 
     let mut hostkeyoffset = 0;
     let hkalg = pop_ssh_bytes(&shostkey, &mut hostkeyoffset);
     let hkblob = pop_ssh_bytes(&shostkey, &mut hostkeyoffset);
-    eprintln!("Host key algorithm: {}", String::from_utf8_lossy(hkalg));
-    eprintln!("Host key blob is {} bytes", hkblob.len());
+    dprint!(debug,"Host key algorithm: {}", String::from_utf8_lossy(hkalg));
+    dprint!(debug,"Host key blob is {} bytes", hkblob.len());
     let peer_pubkey = signature::UnparsedPublicKey::new(&signature::ED25519, hkblob);
-    eprintln!("Verifying signature");
+    dprint!(debug,"Verifying signature");
     peer_pubkey.verify(hashb, sigblob).unwrap_or_else(|e| {
         eprintln!("Signature verification failed: {}\nThis means there is a man in the middle attack.", e);
         process::exit(1);
     });
-    eprintln!("Signature verified successfully!");
+    dprint!(debug,"Signature verified successfully!");
 
 
     let hash = ring::digest::digest(&ring::digest::SHA256, shostkey);
     let encoded = general_purpose::STANDARD_NO_PAD.encode(hash.as_ref());
-    eprintln!("===== HOST KEY VERIFICATION =====");
+    eprintln!("\x1b[2K\r===== HOST KEY VERIFICATION =====");
     eprintln!("Key fingerprint of {} is:\n    SHA256:{}",server,encoded);
     eprintln!("Do you trust this fingerprint? (yes/no/[fingerprint])");
-    eprint!("> ");
+    dprint!(debug,"> ");
     std::io::stdout().flush().unwrap();
-
     let mut response = String::new();
     std::io::stdin().read_line(&mut response).unwrap();
     let response = response.trim();
     let responsel= response.to_lowercase();
-
+    eprint!("\n");
     if responsel != "yes" {
         if responsel == "no"{
             eprintln!("Aborting.");
@@ -694,9 +711,9 @@ fn main() {
             eprintln!("Host key fingerprint successfully matched. ")
         }
     }
-    eprintln!("Sending NEWKEYS message");
+    dprint!(debug,"Sending NEWKEYS message");
     write_packet(&mut stream, &[SshMessage::NewKeys as u8], &mut transport);
-    eprintln!("Receiving reply");
+    dprint!(debug,"Receiving reply");
     let newkeys_reply = read_packet(&mut stream, &mut transport);
     if newkeys_reply[0] != SshMessage::NewKeys as u8 {
         eprintln!("Expected NEWKEYS message, got {}", newkeys_reply[0]);
@@ -708,8 +725,8 @@ fn main() {
     let _server_host_key_algs = pop_ssh_bytes(&server_kexinit, &mut offset);
     let server_ciphers_c2s = pop_ssh_bytes(&server_kexinit, &mut offset);
     let server_ciphers_s2c = pop_ssh_bytes(&server_kexinit, &mut offset);
-    eprintln!("Server ciphers (c2s): {}", String::from_utf8_lossy(server_ciphers_c2s));
-    eprintln!("Server ciphers (s2c): {}", String::from_utf8_lossy(server_ciphers_s2c));
+    dprint!(debug,"Server ciphers (c2s): {}", String::from_utf8_lossy(server_ciphers_c2s));
+    dprint!(debug,"Server ciphers (s2c): {}", String::from_utf8_lossy(server_ciphers_s2c));
 
     let selected_cipher = find_common_cipher(ciphers.clone(), String::from_utf8_lossy(server_ciphers_c2s).as_ref());
 
@@ -746,10 +763,10 @@ fn main() {
         process::exit(1);
     });
 
-    eprintln!("=== Encrypted tunnel established successfully ===");
-    eprintln!("Using cipher: {}", selected_cipher);
+    dprint!(debug,"=== Encrypted tunnel established successfully ===");
+    dprint!(debug,"Using cipher: {}", selected_cipher);
 
-    eprintln!("Requesting service");
+    dprint!(debug,"Requesting service");
     let mut req = Vec::new();
     req.push(SshMessage::ServiceRequest as u8);
     push_ssh_string(&mut req, "ssh-userauth");
@@ -758,19 +775,19 @@ fn main() {
     loop {
         let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
         if reply[0] == SshMessage::ServiceAccept as u8 {
-            eprintln!("Service accepted.");
+            dprint!(debug,"Service accepted.");
             break;
         } else if reply[0] == SshMessage::ExtInfo as u8 {
-            eprintln!("Received EXT_INFO, ignoring");
+            dprint!(debug,"Received EXT_INFO, ignoring");
         } else {
-            eprintln!("Ignoring packet {}", reply[0]);
+            dprint!(debug,"Ignoring packet {}", reply[0]);
         }
     }
 
     'password: loop {
-        let prompt = format!("Password for {}@{}\n> ", user, server);
+        let prompt = format!("\x1b[2K\rPassword for {}@{}\n> ", user, server);
         let password = rpassword::prompt_password(&prompt).unwrap_or_else(|_e| {
-            eprint!("\r      \r");
+            dprint!(debug,"      \r");
             process::exit(130);
         });
         let mut auth_req = Vec::new();
@@ -780,14 +797,17 @@ fn main() {
         push_ssh_string(&mut auth_req, "password");
         auth_req.push(0);
         push_ssh_string(&mut auth_req, &password);
+        dprint!(debug,"Sending password encrypted");
         write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &auth_req);
 
         loop {
+            dprint!(debug,"Reading reply");
             let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
             if reply[0] == SshMessage::UserauthSuccess as u8 {
                 break 'password;
             } else if reply[0] == SshMessage::UserauthFailure as u8 {
                 eprintln!("Invalid password.");
+                process::exit(1);
             } else if reply[0] == SshMessage::UserauthBanner as u8 {
                 eprintln!("Received a banner, idk how to print it");
             }
@@ -800,15 +820,18 @@ fn main() {
     chan_req.extend_from_slice(&0u32.to_be_bytes());
     chan_req.extend_from_slice(&2097152u32.to_be_bytes());
     chan_req.extend_from_slice(&32768u32.to_be_bytes());
+    dprint!(debug,"Requesting channel");
     write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &chan_req);
 
     let server_chan_id;
     loop {
+        dprint!(debug,"Reading reply");
         let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
         if reply[0] == SshMessage::ChannelOpenConfirmation as u8 {
             let mut offset = 1;
             let _my_chan_id = read_u32(&reply, &mut offset);
             server_chan_id = read_u32(&reply, &mut offset);
+            eprint!("\x1b[2K\r");
             eprintln!("[Channel {}]", server_chan_id);
             break;
         }
@@ -825,6 +848,7 @@ fn main() {
     pty_req.extend_from_slice(&0u32.to_be_bytes());
     pty_req.extend_from_slice(&0u32.to_be_bytes());
     push_ssh_string(&mut pty_req, "");
+    dprint!(debug,"Requesting PTY");
     write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &pty_req);
 
     let mut shell_req = Vec::new();
@@ -832,6 +856,7 @@ fn main() {
     shell_req.extend_from_slice(&server_chan_id.to_be_bytes());
     push_ssh_string(&mut shell_req, "shell");
     shell_req.push(0);
+    dprint!(debug,"Requesting shell...");
     write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &shell_req);
 
     let mut read_stream = stream.try_clone().unwrap_or_else(|e| {
@@ -860,6 +885,7 @@ fn main() {
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 1024];
     let _raw_mode = RawModeGuard::new();
+    eprint!("\x1b[2K\r");
     loop {
         let n = stdin.read(&mut buf).unwrap();
         if n == 0 { break; }
