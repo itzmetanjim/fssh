@@ -17,3 +17,5 @@ crossterm = "0.29.0"
 base64 = "0.22.1"
 ssh-key = { version = "0.6.7", features = ["ed25519", "encryption", "rsa", "std"] }
 signal-hook = "0.4.4"
+shellexpand = "3.1.2"
+signature = "2"

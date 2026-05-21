@@ -9,7 +9,7 @@ use std::net::TcpStream;
 use ring;
 use rand::{RngCore, thread_rng};
 use ring::agreement;
-use ring::signature;
+use ring::signature as rsignature;
 use ring::digest;
 use aes_gcm::{Aes128Gcm, Aes256Gcm, Nonce};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -17,9 +17,14 @@ use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use poly1305::Poly1305;
 // }
+use ssh_key::{PrivateKey};
+use signature::Signer;
+use std::fs;
+
 
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode,LeaveAlternateScreen};
 use crossterm::{execute,cursor::Show};
+
 const CLIENT_VERSION: &str = "SSH-2.0-OpenSSH_10.2p1, LibreSSL 3.3.6\n";
 macro_rules! dprint {
     ($debug:expr, $fmt:expr $(, $($arg:tt)*)?) => {
@@ -71,6 +76,7 @@ impl Drop for RawModeGuard {
         let _ = stdout().flush();
     }
 }
+
 fn read_packet(stream: &mut TcpStream, transport: &mut Transport) -> Vec<u8> {
     transport.recv_sequence = transport.recv_sequence.wrapping_add(1);
     let mut lenb = [0u8; 4];
@@ -130,7 +136,91 @@ fn write_packet(stream: &mut TcpStream, payload: &[u8], transport: &mut Transpor
     });
     transport.send_sequence = transport.send_sequence.wrapping_add(1);
 }
-
+fn load_key(path:&str)->PrivateKey{
+    let path=shellexpand::tilde(path).to_string();
+    let content=fs::read_to_string(&path).unwrap_or_else(|e| {
+        eprintln!("Failed to read private key file: {}", e);
+        process::exit(1);
+    });
+    let mut key=PrivateKey::from_openssh(&content).unwrap_or_else(|e| {
+        eprintln!("Failed to parse private key: {}", e);
+        process::exit(1);
+    });
+    if key.is_encrypted(){
+        let prompt=format!("\x1b[2K\rEnter passphrase for key ({}): ", path);
+        let pass=rpassword::prompt_password(prompt).unwrap_or_else(|e| {
+            eprintln!("Failed to read passphrase: {}", e);
+            process::exit(1);
+        });
+        key=key.decrypt(&pass).unwrap_or_else(|e| {
+            eprintln!("Failed to decrypt private key: {}", e);
+            process::exit(1);
+        });
+    };
+    return key;
+}
+fn try_pubkey(stream:&mut std::net::TcpStream, user:&str,session_id:&[u8],client_cipher:&Cipher,
+    server_cipher:&Cipher,send_seq:&mut u32,
+    recv_seq:&mut u32,key_path:&str,debug: bool)->bool{
+    let key=load_key(key_path);
+    let pubkeyb=key.public_key().to_bytes().unwrap_or_else(|e|{
+        eprintln!("Failed to serialize public key: {}", e);
+        process::exit(1);
+    });
+    let mut query=Vec::new();
+    query.push(SshMessage::UserauthRequest as u8);
+    push_ssh_string(&mut query, user);
+    push_ssh_string(&mut query, "ssh-connection");
+    push_ssh_string(&mut query, "publickey");
+    query.push(0);//just a check
+    push_ssh_string(&mut query, "ssh-ed25519");
+    push_ssh_bytes(&mut query, &pubkeyb);
+    dprint!(debug,"Trying public key {}", key_path);
+    write_enc_packet(stream, client_cipher, send_seq, &query);
+    let reply=read_enc_packet(stream, server_cipher, recv_seq);
+    if reply[0]!= SshMessage::UserauthPkOk as u8 {
+        dprint!(debug,"Public key {} not accepted by server", key_path);
+        return false;
+    }
+    dprint!(debug,"Public key {} accepted by server", key_path);
+    let mut blob=Vec::new();
+    push_ssh_bytes(&mut blob, session_id); //from kex
+    blob.push(SshMessage::UserauthRequest as u8);
+    push_ssh_string(&mut blob, user);
+    push_ssh_string(&mut blob, "ssh-connection");
+    push_ssh_string(&mut blob, "publickey");
+    blob.push(1);//actually signing
+    push_ssh_string(&mut blob, "ssh-ed25519");
+    push_ssh_bytes(&mut blob, &pubkeyb);
+    let sig=Signer::sign(&key,&blob);
+    /*.unwrap_or_else(|e| {
+      eprintln!("Failed to sign authentication blob: {}", e);
+      process::exit(1);
+      });*/
+    let sigbytes=sig.as_bytes();
+    let mut authpacket=Vec::new();
+    authpacket.push(SshMessage::UserauthRequest as u8);
+    push_ssh_string(&mut authpacket, user);
+    push_ssh_string(&mut authpacket, "ssh-connection");
+    push_ssh_string(&mut authpacket, "publickey");
+    authpacket.push(1);
+    push_ssh_string(&mut authpacket, "ssh-ed25519");
+    push_ssh_bytes(&mut authpacket, &pubkeyb);
+    let mut encodedsig=Vec::new();
+    push_ssh_string(&mut encodedsig, "ssh-ed25519");
+    push_ssh_bytes(&mut encodedsig, sigbytes);
+    push_ssh_bytes(&mut authpacket, &encodedsig);
+    dprint!(debug,"Sending authentication packet");
+    write_enc_packet(stream, client_cipher, send_seq, &authpacket);
+    let auth_reply=read_enc_packet(stream, server_cipher, recv_seq);
+    if auth_reply[0]== SshMessage::UserauthSuccess as u8 {
+        dprint!(debug,"Authentication successful with key {}", key_path);
+        return true;
+    } else {
+        dprint!(debug,"Authentication failed with key {}", key_path);
+        return false;
+    }
+}
 #[repr(u8)]
 enum SshMessage {
     //Disconnect = 1,
@@ -683,7 +773,7 @@ fn main() {
     let hkblob = pop_ssh_bytes(&shostkey, &mut hostkeyoffset);
     dprint!(debug,"Host key algorithm: {}", String::from_utf8_lossy(hkalg));
     dprint!(debug,"Host key blob is {} bytes", hkblob.len());
-    let peer_pubkey = signature::UnparsedPublicKey::new(&signature::ED25519, hkblob);
+    let peer_pubkey = rsignature::UnparsedPublicKey::new(&rsignature::ED25519, hkblob);
     dprint!(debug,"Verifying signature");
     peer_pubkey.verify(hashb, sigblob).unwrap_or_else(|e| {
         eprintln!("Signature verification failed: {}\nThis means there is a man in the middle attack.", e);
@@ -782,7 +872,7 @@ fn main() {
     loop {
         let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
         if reply[0] == SshMessage::ServiceAccept as u8 {
-            dprint!(debug,"Service accepted.");
+            dprint!(debug,"Service accepted. ");
             break;
         } else if reply[0] == SshMessage::ExtInfo as u8 {
             dprint!(debug,"Received EXT_INFO, ignoring");
@@ -790,37 +880,53 @@ fn main() {
             dprint!(debug,"Ignoring packet {}", reply[0]);
         }
     }
+    let mut authdone=false;
 
-    'password: loop {
-        let prompt = format!("\x1b[2K\rPassword for {}@{}\n> ", user, server);
-        let password = rpassword::prompt_password(&prompt).unwrap_or_else(|_e| {
-            dprint!(debug,"      \r");
-            process::exit(130);
-        });
-        let mut auth_req = Vec::new();
-        auth_req.push(SshMessage::UserauthRequest as u8);
-        push_ssh_string(&mut auth_req, &user);
-        push_ssh_string(&mut auth_req, "ssh-connection");
-        push_ssh_string(&mut auth_req, "password");
-        auth_req.push(0);
-        push_ssh_string(&mut auth_req, &password);
-        dprint!(debug,"Sending password encrypted");
-        write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &auth_req);
+    if try_pubkey(
+        &mut stream, 
+        &user, 
+        hashb, 
+        &cipher, 
+        &server_cipher, 
+        &mut transport.send_sequence, 
+        &mut transport.recv_sequence, 
+        "~/.ssh/id_ed25519",debug
+    ){
+        authdone=true;
+    } else {
+        dprint!(debug,"Public key authentication failed or not offered by server.");
+    }
+    if!authdone{
+        'password: loop {
+            let prompt = format!("\x1b[2K\rPassword for {}@{}\n> ", user, server);
+            let password = rpassword::prompt_password(&prompt).unwrap_or_else(|_e| {
+                dprint!(debug,"      \r");
+                process::exit(130);
+            });
+            let mut auth_req = Vec::new();
+            auth_req.push(SshMessage::UserauthRequest as u8);
+            push_ssh_string(&mut auth_req, &user);
+            push_ssh_string(&mut auth_req, "ssh-connection");
+            push_ssh_string(&mut auth_req, "password");
+            auth_req.push(0);
+            push_ssh_string(&mut auth_req, &password);
+            dprint!(debug,"Sending password encrypted");
+            write_enc_packet(&mut stream, &cipher, &mut transport.send_sequence, &auth_req);
 
-        loop {
-            dprint!(debug,"Reading reply");
-            let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
-            if reply[0] == SshMessage::UserauthSuccess as u8 {
-                break 'password;
-            } else if reply[0] == SshMessage::UserauthFailure as u8 {
-                eprintln!("Invalid password.");
-                process::exit(1);
-            } else if reply[0] == SshMessage::UserauthBanner as u8 {
-                eprintln!("Received a banner, idk how to print it");
+            loop {
+                dprint!(debug,"Reading reply");
+                let reply = read_enc_packet(&mut stream, &server_cipher, &mut transport.recv_sequence);
+                if reply[0] == SshMessage::UserauthSuccess as u8 {
+                    break 'password;
+                } else if reply[0] == SshMessage::UserauthFailure as u8 {
+                    eprintln!("Invalid password.");
+                    process::exit(1);
+                } else if reply[0] == SshMessage::UserauthBanner as u8 {
+                    eprintln!("Received a banner, idk how to print it");
+                }
             }
         }
     }
-
     let mut chan_req = Vec::new();
     chan_req.push(SshMessage::ChannelOpen as u8);
     push_ssh_string(&mut chan_req, "session");
