@@ -4,6 +4,8 @@ use whoami::username;
 use std::process;
 use std::io::{Read,Write,stdout};
 use std::net::TcpStream;
+
+//for now {
 use ring;
 use rand::{RngCore, thread_rng};
 use ring::agreement;
@@ -14,6 +16,8 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use poly1305::Poly1305;
+// }
+
 use crossterm::terminal::{enable_raw_mode, disable_raw_mode,LeaveAlternateScreen};
 use crossterm::{execute,cursor::Show};
 const CLIENT_VERSION: &str = "SSH-2.0-OpenSSH_10.2p1, LibreSSL 3.3.6\n";
@@ -134,6 +138,7 @@ enum SshMessage {
     //Unimplemented = 3,
     ServiceRequest = 5,
     ServiceAccept = 6,
+    ExtInfo = 7,
     KexInit = 20,
     NewKeys = 21,
     KexEcdhInit = 30,
@@ -142,7 +147,7 @@ enum SshMessage {
     UserauthSuccess = 52,
     UserauthFailure = 51,
     UserauthBanner = 53,
-    ExtInfo = 7,
+    UserauthPkOk  = 60,
     ChannelOpen = 90,
     ChannelOpenConfirmation = 91,
     ChannelData = 94,
@@ -292,10 +297,10 @@ fn decrypt_length_chacha20(header_key: &[u8; 32], seq: u32, encrypted_header: &[
     // Ensure we only process 4 bytes
     let mut header = [0u8; 4];
     header.copy_from_slice(&encrypted_header[..4]);
-    
+
     let mut header_cipher = ChaCha20::new(header_key.into(), &nonce.into());
     header_cipher.apply_keystream(&mut header);
-    
+
     u32::from_be_bytes(header)
 }
 
@@ -313,7 +318,7 @@ fn decrypt_payload_chacha20(main_key: &[u8; 32], seq: u32, encrypted_header: &[u
     nonce[4..12].copy_from_slice(&counter);
 
     let mut chacha = ChaCha20::new(main_key.into(), &nonce.into());
-    
+
     let mut poly_block=[0u8;64];
     chacha.apply_keystream(&mut poly_block);
     let mut poly_key = [0u8; 32];
@@ -321,12 +326,12 @@ fn decrypt_payload_chacha20(main_key: &[u8; 32], seq: u32, encrypted_header: &[u
 
     // Step 2: Separate body and tag
     let (body, tag) = encrypted_body_with_tag.split_at(encrypted_body_with_tag.len() - 16);
-    
+
     // Step 3: Verify MAC
     // MAC is calculated over [4-byte encrypted length] + [encrypted payload + padding]
     let mut mac_data = encrypted_header[..4].to_vec(); 
     mac_data.extend_from_slice(body);
-    
+
     let expected_tag = Poly1305::new(&poly_key.into()).compute_unpadded(&mac_data);
     if expected_tag[..] != tag[..] {
         eprintln!("SSH MAC Verification Failed! Potential tampering or key mismatch.");
@@ -336,7 +341,7 @@ fn decrypt_payload_chacha20(main_key: &[u8; 32], seq: u32, encrypted_header: &[u
     // Step 4: Decrypt Body (Starting at Counter 1)
     let mut decrypted = body.to_vec();
     chacha.apply_keystream(&mut decrypted);
-    
+
     let padding_len = decrypted[0] as usize;
     decrypted[1..decrypted.len() - padding_len].to_vec()
 }
@@ -725,8 +730,10 @@ fn main() {
     let _server_host_key_algs = pop_ssh_bytes(&server_kexinit, &mut offset);
     let server_ciphers_c2s = pop_ssh_bytes(&server_kexinit, &mut offset);
     let server_ciphers_s2c = pop_ssh_bytes(&server_kexinit, &mut offset);
-    dprint!(debug,"Server ciphers (c2s): {}", String::from_utf8_lossy(server_ciphers_c2s));
-    dprint!(debug,"Server ciphers (s2c): {}", String::from_utf8_lossy(server_ciphers_s2c));
+    if debug{
+        dprint!(debug,"Server ciphers (c2s): {}", String::from_utf8_lossy(server_ciphers_c2s));
+        dprint!(debug,"Server ciphers (s2c): {}", String::from_utf8_lossy(server_ciphers_s2c));
+    }
 
     let selected_cipher = find_common_cipher(ciphers.clone(), String::from_utf8_lossy(server_ciphers_c2s).as_ref());
 
@@ -843,8 +850,9 @@ fn main() {
     push_ssh_string(&mut pty_req, "pty-req");
     pty_req.push(0);
     push_ssh_string(&mut pty_req, "xterm");
-    pty_req.extend_from_slice(&80u32.to_be_bytes());
-    pty_req.extend_from_slice(&24u32.to_be_bytes());
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    pty_req.extend_from_slice(&(cols as u32).to_be_bytes());
+    pty_req.extend_from_slice(&(rows as u32).to_be_bytes());
     pty_req.extend_from_slice(&0u32.to_be_bytes());
     pty_req.extend_from_slice(&0u32.to_be_bytes());
     push_ssh_string(&mut pty_req, "");
