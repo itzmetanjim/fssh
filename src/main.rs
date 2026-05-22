@@ -38,11 +38,11 @@ macro_rules! dprint {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about = "A simple SSH tool")]
+#[command(version, about = "An SSH client.")]
 struct Args {
     host: String,
 
-    #[arg(short, long, default_value_t = 22)]
+    #[arg(short, long, default_value_t = 22,help="Port to connect to")]
     port: u16,
 
     #[arg(long, help = "Comma-separated list of allowed ciphers")]
@@ -53,6 +53,9 @@ struct Args {
 
     #[arg(long, help = "Whether to debug or not")]
     debug: bool,
+
+    #[arg(short,long,help="Private key to use",default_value="~/.ssh/id_ed25519")]
+    key:String,
 }
 
 struct Transport {
@@ -632,6 +635,7 @@ fn main() {
     let parts: Vec<&str> = args.host.split("@").collect();
     let user = if parts.len() == 1 { username().unwrap_or("".into()) } else { parts[0].into() };
     let server = parts[parts.len() - 1];
+    let prkey=args.key;
 
     if user == "" {
         eprintln!("No username given and could not detect username.\nPlease use @ to seperate the username and host e.g\n    {} username@my-host.com", std::env::args().next().unwrap_or("fssh".into()));
@@ -890,7 +894,7 @@ fn main() {
         &server_cipher, 
         &mut transport.send_sequence, 
         &mut transport.recv_sequence, 
-        "~/.ssh/id_ed25519",debug
+        &prkey,debug
     ){
         authdone=true;
     } else {
