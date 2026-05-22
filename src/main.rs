@@ -55,7 +55,7 @@ struct Args {
     debug: bool,
 
     #[arg(short,long,help="Private key to use",default_value="~/.ssh/id_ed25519")]
-    key:String,
+    identity:String,
 }
 
 struct Transport {
@@ -635,7 +635,7 @@ fn main() {
     let parts: Vec<&str> = args.host.split("@").collect();
     let user = if parts.len() == 1 { username().unwrap_or("".into()) } else { parts[0].into() };
     let server = parts[parts.len() - 1];
-    let prkey=args.key;
+    let prkey=args.identity;
 
     if user == "" {
         eprintln!("No username given and could not detect username.\nPlease use @ to seperate the username and host e.g\n    {} username@my-host.com", std::env::args().next().unwrap_or("fssh".into()));
