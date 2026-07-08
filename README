@@ -5,7 +5,7 @@ my own ssh client, made from scratch!
 
 i didn't use any ssh library or anything this is fully from scratch. 
 
-supports both password auth and public key auth (only ed25519 im too lazy to add RSA)
+supports both password auth and public key auth (only ed25519 im too lazy to add RSA), also supports hostkey verification though doesnt store in a file
 
 Usage: fssh [OPTIONS] <HOST>
 
