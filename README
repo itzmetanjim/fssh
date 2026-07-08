@@ -1,0 +1,24 @@
+fssh
+====
+
+my own ssh client, made from scratch! 
+
+i didn't use any ssh library or anything this is fully from scratch. 
+
+supports both password auth and public key auth (only ed25519 im too lazy to add RSA)
+
+Usage: fssh [OPTIONS] <HOST>
+
+Arguments:
+  <HOST>  
+
+Options:
+  -p, --port <PORT>          Port to connect to [default: 22]
+      --algs <ALGS>          Comma-separated list of allowed ciphers
+      --not-algs <NOT_ALGS>  Comma-separated list of ciphers to exclude
+      --debug                Whether to debug or not
+  -i, --identity <IDENTITY>  Private key to use [default: ~/.ssh/id_ed25519]
+  -l, --login <LOGIN>        Username to log in with
+  -h, --help                 Print help
+  -V, --version              Print version
+
