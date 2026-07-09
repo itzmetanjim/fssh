@@ -1,16 +1,17 @@
 fssh
 ====
 
-my own ssh client, made from scratch! 
+my own ssh client, made from scratch! in rust btw.
 
-i didn't use any ssh library or anything this is fully from scratch. 
+i didn't use any ssh library or anything this is fully from scratch.
 
-supports both password auth and public key auth (only ed25519 im too lazy to add RSA), also supports hostkey verification though doesnt store in a file
+supports both password auth and public key auth (only ed25519 im too lazy to add
+RSA), also supports hostkey verification though it doesn't store it in a file.
 
 Usage: fssh [OPTIONS] <HOST>
 
 Arguments:
-  <HOST>  
+  <HOST>
 
 Options:
   -p, --port <PORT>          Port to connect to [default: 22]
@@ -22,3 +23,42 @@ Options:
   -h, --help                 Print help
   -V, --version              Print version
 
+installation
+============
+
+precompiled binaries
+--------------------
+
+i only compiled it for windows x86_64, linux GNU x86_64 and apple silicon macOS
+if you are not using any of those please compile it yourself.
+
+1. go to the github release and download your binary:
+        <i havent uploaded the release yet TODO TODO put the link here>
+2. copy it to somewhere on PATH. make sure to name it fssh or fssh.exe
+    in linux/macOS, /usr/bin will work
+    in windows, look up on how to add a directory to PATH and copy the binary
+3. restart your shell, you should be done
+
+
+compiling it yourself
+---------------------
+
+1. install rust:
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+2. compile the thing for release
+        cargo build --release
+3. the binary is in target/release/fssh (or fssh.exe), copy it to somewhere in
+   PATH.
+
+   linux and macOS:
+        sudo cp target/release/fssh /usr/bin
+   windows:
+    add a directory to PATH, then copy the file target/release/fssh.exe to that
+    directory
+
+compiling it for other OS
+-------------------------
+
+i use zigbuild for cross-compiling. some people like cross as well for it. you
+should research it up yourself and find out what works best for you. im not
+going to put a tutorial on how to cross-compile rust projects here.
