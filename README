@@ -37,7 +37,7 @@ i only compiled it for windows x86_64, linux GNU x86_64 and apple silicon macOS
 if you are not using any of those please compile it yourself.
 
 1. go to the github release and download your binary:
-        <i havent uploaded the release yet TODO TODO put the link here>
+        https://github.com/itzmetanjim/fssh/releases/tag/v0.1.0
 2. copy it to somewhere on PATH. make sure to name it fssh or fssh.exe
     in linux/macOS, /usr/bin will work
     in windows, look up on how to add a directory to PATH and copy the binary
